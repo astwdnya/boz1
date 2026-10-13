@@ -124,7 +124,19 @@ async function pick(name) {
     document.body.replaceWith(document.importNode(page.body, true));
     history.pushState(null, '', url); // perf7: keep ?dumpPipelines=1 etc. (the pipe reads the page query); ?horde=1
     globalThis.__kisakLandingPick = name;
+    if (!document.querySelector('link[href*="modmenu.css"]')) {
+      const cssLink = document.createElement('link');
+      cssLink.rel = 'stylesheet';
+      cssLink.href = 'modmenu.css';
+      document.head.appendChild(cssLink);
+    }
     await import('./play.js');
+    try {
+      await import('./modmenu.js');
+      if (window.__modMenu) window.__modMenu.ensureMounted();
+    } catch (e) {
+      console.warn('[MODMENU] Import warning:', e);
+    }
   } catch (error) {
     console.error('landing pick failed, opening the map page', error);
     location.assign(url);

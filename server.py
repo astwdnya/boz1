@@ -26,6 +26,9 @@ mimetypes.add_type('application/json', '.json')
 # ========================================================
 ROOMS = {}
 ROOMS_LOCK = threading.Lock()
+ROOM_PLAYERS_SYNC = {}
+ROOM_SYNC_LOCK = threading.Lock()
+
 
 def get_time_str():
     return time.strftime("%H:%M:%S", time.localtime())
@@ -284,8 +287,43 @@ class GameServerHandler(BaseHTTPRequestHandler):
                             self.send_json({'success': True})
                             return
 
+            # 6. Real-time In-Game Player State Sync
+            elif path in ('/api/rooms/sync', '/api/rooms/sync/'):
+                room_id = (data.get('roomId') or '').strip()
+                player_id = (data.get('playerId') or '').strip()
+                player_state = data.get('state') or {}
+
+                if not room_id or not player_id:
+                    self.send_json({'success': False, 'error': 'Missing roomId or playerId'}, status=400)
+                    return
+
+                now = time.time()
+                with ROOM_SYNC_LOCK:
+                    if room_id not in ROOM_PLAYERS_SYNC:
+                        ROOM_PLAYERS_SYNC[room_id] = {}
+
+                    player_state['playerId'] = player_id
+                    player_state['updatedAt'] = now
+                    ROOM_PLAYERS_SYNC[room_id][player_id] = player_state
+
+                    # Collect other active players in this room
+                    others = []
+                    stale = []
+                    for pid, pdata in list(ROOM_PLAYERS_SYNC[room_id].items()):
+                        if now - pdata.get('updatedAt', 0) > 8.0:
+                            stale.append(pid)
+                        elif pid != player_id:
+                            others.append(pdata)
+
+                    for pid in stale:
+                        ROOM_PLAYERS_SYNC[room_id].pop(pid, None)
+
+                self.send_json({'success': True, 'others': others})
+                return
+
                 self.send_json({'success': False}, status=400)
                 return
+
 
         # Gracefully handle Cloudflare RUM / local telemetry
         self.send_response(204)
@@ -318,6 +356,20 @@ class GameServerHandler(BaseHTTPRequestHandler):
         # ---------------- Multiplayer API Endpoints ----------------
         if clean_path.startswith('api/rooms'):
             cleanup_stale_rooms()
+
+            # Real-time state sync poll via GET
+            if clean_path in ('api/rooms/sync', 'api/rooms/sync/'):
+                room_id = query.get('roomId', [''])[0].strip()
+                player_id = query.get('playerId', [''])[0].strip()
+                now = time.time()
+                others = []
+                with ROOM_SYNC_LOCK:
+                    if room_id in ROOM_PLAYERS_SYNC:
+                        for pid, pdata in list(ROOM_PLAYERS_SYNC[room_id].items()):
+                            if pid != player_id and now - pdata.get('updatedAt', 0) <= 8.0:
+                                others.append(pdata)
+                self.send_json({'success': True, 'others': others})
+                return
 
             # Poll specific room status
             if clean_path in ('api/rooms/poll', 'api/rooms/poll/'):

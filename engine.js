@@ -422,6 +422,30 @@ export function createEngine(canvas, state) {
       '+set', 'developer', '0',
       '+set', 'sensitivity', String(settings.sensitivity),
       '+set', 'snd_menu_master', String(settings.volume), '+set', 'r_customMode', `${canvas.width}x${canvas.height}`);
+
+    // Online Multiplayer Co-op: Enable 2 clients and testclient if launched from party lobby
+    try {
+      const partyData = sessionStorage.getItem('bo1z-online-party');
+      if (partyData) {
+        const p = JSON.parse(partyData);
+        if (p && p.room) {
+          const tcIdx = args.indexOf('kisak_testclient');
+          if (tcIdx !== -1 && tcIdx + 1 < args.length) {
+            args[tcIdx + 1] = '1';
+          }
+          args.splice(args.indexOf('+devmap'), 0,
+            '+set', 'sv_maxclients', '2',
+            '+set', 'party_maxplayers', '2',
+            '+set', 'cl_maxclients', '2',
+            '+set', 'splitscreen', '0',
+            '+set', 'onlinegame', '1'
+          );
+        }
+      }
+    } catch (e) {
+      console.warn('Error reading party data in engine.js:', e);
+    }
+
     const query = new URLSearchParams(location.search);
     const perfMode = query.get('quality') !== 'high' && localStorage.getItem('bo1z-quality') !== 'high';
     if (perfMode) {

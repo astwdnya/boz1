@@ -209,8 +209,206 @@ class ModMenuManager {
     };
 
     this.espAnimFrame = null;
+    this.coopPlayers = [];
+    this.coopSyncTimer = null;
+    this.isTabScoreboardVisible = false;
+    this.setupGlobalHotkeys();
     this.init();
+    this.setupCoopSync();
+
+    // Auto-heal overlay if document.body was replaced by landing.js
+    setInterval(() => {
+      this.ensureMounted();
+    }, 800);
   }
+
+  ensureMounted() {
+    if (!document.getElementById('modmenu-overlay') || !document.getElementById('modmenu-badge')) {
+      this.init();
+    }
+  }
+
+  onGameEnter() {
+    this.ensureMounted();
+    this.setupCoopSync();
+    this.cmd('set bg_fallDamageMaxHeight 99999');
+    try {
+      const partyData = sessionStorage.getItem('bo1z-online-party');
+      if (partyData) {
+        this.cmd('addtestclient');
+      }
+    } catch (e) {}
+  }
+
+  setupGlobalHotkeys() {
+    if (window.__modMenuHotkeysBound) return;
+    window.__modMenuHotkeysBound = true;
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Insert' || e.code === 'F1' || e.code === 'F2' || e.code === 'Backquote') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        this.toggle();
+      } else if (e.code === 'Tab') {
+        this.showScoreboard();
+      }
+    }, true);
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Tab') {
+        this.hideScoreboard();
+      }
+    }, true);
+  }
+
+  setupCoopSync() {
+    let partyData = null;
+    try {
+      const raw = sessionStorage.getItem('bo1z-online-party');
+      if (raw) partyData = JSON.parse(raw);
+    } catch (e) {}
+
+    if (!partyData || !partyData.room) return;
+
+    const roomId = partyData.room.id;
+    const playerId = partyData.playerId || 'p-player';
+    const isHost = Boolean(partyData.isHost);
+    const myName = (partyData.room.players || []).find(p => p.id === playerId)?.name || (isHost ? 'Host' : 'Player');
+
+    // Ensure ESP overlay loop is active for drawing teammates & radar
+    if (!this.espAnimFrame) {
+      this.startESPOverlay();
+    }
+
+    if (this.coopSyncTimer) clearInterval(this.coopSyncTimer);
+    this.coopSyncTimer = setInterval(async () => {
+      try {
+        const memCtx = this.getMemoryContext();
+        const cam = memCtx?.camera;
+        const myX = cam && cam.valid ? cam.x : 0;
+        const myY = cam && cam.valid ? cam.y : 0;
+        const myZ = cam && cam.valid ? cam.z : 0;
+        const fwdX = cam && cam.valid ? cam.fwd.x : 0;
+        const fwdY = cam && cam.valid ? cam.fwd.y : 0;
+        const fwdZ = cam && cam.valid ? cam.fwd.z : 0;
+
+        let currentScore = 500;
+        if (memCtx?.cgPtr && memCtx?.heapU32) {
+          const sc = memCtx.heapU32[(memCtx.cgPtr + 372736) >> 2];
+          if (sc > 0 && sc < 1000000) currentScore = sc;
+        }
+
+        const payload = {
+          roomId: roomId,
+          playerId: playerId,
+          state: {
+            name: myName,
+            isHost: isHost,
+            x: myX,
+            y: myY,
+            z: myZ,
+            fwdX: fwdX,
+            fwdY: fwdY,
+            fwdZ: fwdZ,
+            health: 100,
+            score: currentScore,
+            kills: 0,
+            headshots: 0
+          }
+        };
+
+        const resp = await fetch('/bo1z/api/rooms/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        if (res.success && Array.isArray(res.others)) {
+          this.coopPlayers = res.others;
+        }
+      } catch (err) {}
+    }, 60);
+  }
+
+  showScoreboard() {
+    this.isTabScoreboardVisible = true;
+    let sb = document.getElementById('coop-scoreboard-overlay');
+    if (!sb) {
+      this.init();
+      sb = document.getElementById('coop-scoreboard-overlay');
+    }
+    if (!sb) return;
+
+    let party = null;
+    try {
+      party = JSON.parse(sessionStorage.getItem('bo1z-online-party') || '{}');
+    } catch (e) {}
+
+    const myName = (party?.room?.players || []).find(p => p.id === party?.playerId)?.name || (party?.isHost ? 'Host' : 'Player');
+    const isHost = Boolean(party?.isHost);
+
+    let rowsHtml = `
+      <tr class="coop-sb-row ${isHost ? 'host-row' : 'client-row'}">
+        <td class="coop-sb-name">
+          <span class="coop-sb-badge ${isHost ? 'host' : 'client'}">${isHost ? '👑 HOST' : '🧟 CO-OP'}</span>
+          <span>${myName} (You)</span>
+        </td>
+        <td style="color: #60a5fa; font-weight: 700;">500</td>
+        <td>0</td>
+        <td>0</td>
+        <td><span style="color: #10b981; font-weight: 600;">● ALIVE</span></td>
+        <td style="color: #9ca3af; font-family: monospace;">12ms</td>
+      </tr>
+    `;
+
+    if (this.coopPlayers && this.coopPlayers.length > 0) {
+      for (const other of this.coopPlayers) {
+        const otherIsHost = Boolean(other.isHost);
+        rowsHtml += `
+          <tr class="coop-sb-row ${otherIsHost ? 'host-row' : 'client-row'}">
+            <td class="coop-sb-name">
+              <span class="coop-sb-badge ${otherIsHost ? 'host' : 'client'}">${otherIsHost ? '👑 HOST' : '🧟 CO-OP'}</span>
+              <span>${other.name || 'Friend'}</span>
+            </td>
+            <td style="color: #60a5fa; font-weight: 700;">${other.score || 500}</td>
+            <td>${other.kills || 0}</td>
+            <td>${other.headshots || 0}</td>
+            <td><span style="color: #10b981; font-weight: 600;">● ALIVE</span></td>
+            <td style="color: #9ca3af; font-family: monospace;">22ms</td>
+          </tr>
+        `;
+      }
+    } else {
+      const otherRoomPlayer = (party?.room?.players || []).find(p => p.id !== party?.playerId);
+      if (otherRoomPlayer) {
+        const oHost = Boolean(otherRoomPlayer.isHost);
+        rowsHtml += `
+          <tr class="coop-sb-row ${oHost ? 'host-row' : 'client-row'}">
+            <td class="coop-sb-name">
+              <span class="coop-sb-badge ${oHost ? 'host' : 'client'}">${oHost ? '👑 HOST' : '🧟 CO-OP'}</span>
+              <span>${otherRoomPlayer.name}</span>
+            </td>
+            <td style="color: #60a5fa; font-weight: 700;">500</td>
+            <td>0</td>
+            <td>0</td>
+            <td><span style="color: #10b981; font-weight: 600;">● CONNECTED</span></td>
+            <td style="color: #9ca3af; font-family: monospace;">24ms</td>
+          </tr>
+        `;
+      }
+    }
+
+    const tbody = document.getElementById('coop-sb-tbody');
+    if (tbody) tbody.innerHTML = rowsHtml;
+    sb.classList.add('active');
+  }
+
+  hideScoreboard() {
+    this.isTabScoreboardVisible = false;
+    const sb = document.getElementById('coop-scoreboard-overlay');
+    if (sb) sb.classList.remove('active');
+  }
+
 
   // Execute console command directly into game engine
   cmd(command) {
@@ -659,8 +857,11 @@ class ModMenuManager {
         this.applyWeaponMemoryMods();
       }
 
-      // If visual ESP overlay is disabled, skip canvas drawing but keep loop alive for background weapon mods
-      if (!this.state.esp) {
+      const hasCoop = Boolean(this.coopPlayers && this.coopPlayers.length > 0);
+      const shouldDraw = this.state.esp || hasCoop;
+
+      // If visual ESP overlay and co-op sync are disabled, skip canvas drawing
+      if (!shouldDraw) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvas.classList.remove('active');
         this.espAnimFrame = requestAnimationFrame(render);
@@ -681,8 +882,87 @@ class ModMenuManager {
       const h = canvas.height;
       scanAngle = (scanAngle + 0.04) % (Math.PI * 2);
 
-      const zombies = this.getLiveZombies(memCtx);
       const cam = memCtx?.camera;
+
+      // ---------------- RENDER 3D CO-OP TEAMMATES & IN-MEMORY ENTITY UPDATE ----------------
+      if (hasCoop && cam && cam.valid) {
+        // Direct Memory Sync: update Entity 1 (centity_t index 1) in engine memory
+        if (memCtx.centitiesBase && memCtx.heapF32) {
+          const ent1Origin = (memCtx.centitiesBase + 808 + 0x24) >> 2;
+          const p = this.coopPlayers[0];
+          if (p && typeof p.x === 'number') {
+            memCtx.heapF32[ent1Origin] = p.x;
+            memCtx.heapF32[ent1Origin + 1] = p.y;
+            memCtx.heapF32[ent1Origin + 2] = p.z;
+          }
+        }
+
+        for (const tm of this.coopPlayers) {
+          if (typeof tm.x !== 'number') continue;
+          const dx = tm.x - cam.x;
+          const dy = tm.y - cam.y;
+          const dz = tm.z - cam.z;
+          const distUnits = Math.hypot(dx, dy, dz);
+          const distM = Math.round(distUnits * 0.0254);
+
+          const feet = this.projectWorldToScreen(tm.x, tm.y, tm.z, cam, w, h);
+          const head = this.projectWorldToScreen(tm.x, tm.y, tm.z + 68, cam, w, h);
+
+          if (feet && head) {
+            const bHeight = Math.max(16, feet.y - head.y);
+            const bWidth = Math.max(12, bHeight * 0.45);
+            const bLeft = feet.x - bWidth / 2;
+            const bTop = head.y;
+
+            ctx.save();
+            ctx.strokeStyle = tm.isHost ? 'rgba(239, 68, 68, 0.9)' : 'rgba(16, 185, 129, 0.9)';
+            ctx.lineWidth = 1.8;
+            ctx.fillStyle = tm.isHost ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)';
+            ctx.strokeRect(bLeft, bTop, bWidth, bHeight);
+            ctx.fillRect(bLeft, bTop, bWidth, bHeight);
+
+            // Snapline to feet
+            ctx.beginPath();
+            ctx.strokeStyle = tm.isHost ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)';
+            ctx.setLineDash([4, 4]);
+            ctx.moveTo(w / 2, h - 20);
+            ctx.lineTo(feet.x, feet.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Floating 3D Nametag badge
+            const tagY = bTop - 18;
+            const tagText = `${tm.isHost ? '👑' : '🧟'} ${tm.name || 'Friend'} [${distM}m]`;
+            ctx.font = 'bold 11px -apple-system, sans-serif';
+            const tagW = ctx.measureText(tagText).width + 16;
+            const tagX = feet.x - tagW / 2;
+
+            ctx.fillStyle = 'rgba(10, 12, 18, 0.9)';
+            ctx.strokeStyle = tm.isHost ? '#ef4444' : '#10b981';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(tagX, tagY - 14, tagW, 18, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(tagText, tagX + 8, tagY - 1);
+
+            // Health bar
+            const hpW = Math.min(60, tagW);
+            const hpX = feet.x - hpW / 2;
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.fillRect(hpX, tagY + 6, hpW, 3);
+            ctx.fillStyle = '#10b981';
+            ctx.fillRect(hpX, tagY + 6, hpW * ((tm.health || 100) / 100), 3);
+
+            ctx.restore();
+          }
+        }
+      }
+
+      const zombies = this.state.esp ? this.getLiveZombies(memCtx) : [];
+
 
       // 2. Draw Real 2D Bounding Boxes on 3D Screen
       let closestZombie = null;
@@ -899,6 +1179,33 @@ class ModMenuManager {
           ctx.beginPath();
           ctx.arc(rx, ry, 3.5, 0, Math.PI * 2);
           ctx.fill();
+        }
+
+        // Plot Teammates on Radar as Cyan / Red blips
+        if (hasCoop) {
+          for (const tm of this.coopPlayers) {
+            if (typeof tm.x !== 'number') continue;
+            const rDx = tm.x - cam.x;
+            const rDy = tm.y - cam.y;
+            const relForward = rDx * cam.fwd.x   + rDy * cam.fwd.y;
+            const relRight   = rDx * cam.right.x + rDy * cam.right.y;
+            const dist2D = Math.hypot(relForward, relRight);
+            const scale = Math.min(radarR - 6, (dist2D / 2800) * (radarR - 6)) / (dist2D || 1);
+            const rx = radarX + relRight * scale;
+            const ry = radarY - relForward * scale;
+
+            ctx.save();
+            ctx.shadowColor = tm.isHost ? '#ef4444' : '#00e5ff';
+            ctx.shadowBlur = 9;
+            ctx.fillStyle = tm.isHost ? '#ef4444' : '#00e5ff';
+            ctx.beginPath();
+            ctx.arc(rx, ry, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+            ctx.restore();
+          }
         }
       }
 
@@ -1340,6 +1647,7 @@ class ModMenuManager {
 
   // --- Toggle Mod Menu Window ---
   toggle() {
+    this.ensureMounted();
     if (this.isOpen) {
       this.close();
     } else {
@@ -1348,6 +1656,7 @@ class ModMenuManager {
   }
 
   open() {
+    this.ensureMounted();
     this.isOpen = true;
     const overlay = document.getElementById('modmenu-overlay');
     if (overlay) overlay.classList.add('active');
@@ -1360,7 +1669,7 @@ class ModMenuManager {
       }
     } catch (e) {}
 
-    this.log('Mod Menu opened with [INSERT]');
+    this.log('Mod Menu opened with [INSERT / F1]');
   }
 
   close() {
@@ -1449,22 +1758,57 @@ class ModMenuManager {
 
   // --- HTML Injection ---
   init() {
-    if (document.getElementById('modmenu-overlay')) return;
+    document.getElementById('modmenu-badge')?.remove();
+    document.getElementById('modmenu-overlay')?.remove();
+    document.getElementById('modmenu-toasts')?.remove();
+    document.getElementById('coop-scoreboard-overlay')?.remove();
 
     // 1. Watermark Floating Badge (Bottom-Right matching photo)
     const badge = document.createElement('div');
     badge.id = 'modmenu-badge';
-    badge.title = 'Press INSERT to toggle';
+    badge.title = 'Click or Press INSERT / F1 to toggle';
     badge.innerHTML = `
       <span class="badge-icon">🌸</span>
       <div class="badge-info">
-        <span class="badge-title">devils</span>
+        <span class="badge-title">devonch</span>
         <span class="badge-version">v2.5.2</span>
       </div>
-      <span class="badge-key">INSERT</span>
+      <span class="badge-key">INSERT / F1</span>
     `;
-    badge.onclick = () => this.toggle();
+    badge.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.toggle();
+    };
     document.body.appendChild(badge);
+
+    // 2. Co-Op Scoreboard Overlay (TAB)
+    const scoreboard = document.createElement('div');
+    scoreboard.id = 'coop-scoreboard-overlay';
+    scoreboard.innerHTML = `
+      <div class="coop-sb-header">
+        <div class="coop-sb-title">
+          <span>💀</span>
+          <span>BLACK OPS ZOMBIES // CO-OP SCOREBOARD</span>
+        </div>
+        <div style="font-size: 11px; color: #fca5a5;">[HOLD TAB TO VIEW]</div>
+      </div>
+      <table class="coop-sb-table">
+        <thead>
+          <tr>
+            <th>PLAYER</th>
+            <th>POINTS</th>
+            <th>KILLS</th>
+            <th>HEADSHOTS</th>
+            <th>STATUS</th>
+            <th>PING</th>
+          </tr>
+        </thead>
+        <tbody id="coop-sb-tbody"></tbody>
+      </table>
+    `;
+    document.body.appendChild(scoreboard);
+
 
     // 2. Toasts Container
     const toasts = document.createElement('div');
@@ -1706,15 +2050,6 @@ class ModMenuManager {
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) this.close();
     });
-
-    // Listen for INSERT key
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'Insert') {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        this.toggle();
-      }
-    }, true);
 
     // Initial weapons render
     this.renderWeaponsGrid();

@@ -14,6 +14,18 @@ const telemetry = startTelemetry(state);
 // fpsui: ?perf=1 or bo1z-perf in localStorage shows the performance readout
 if (new URLSearchParams(location.search).get('perf') === '1' || localStorage.getItem('bo1z-perf') === '1')
   import('./perf-overlay.js').then(m => m.startPerfOverlay()).catch(() => {});
+
+// Guaranteed Mod Menu loading for any map
+if (!document.querySelector('link[href*="modmenu.css"]')) {
+  const cssLink = document.createElement('link');
+  cssLink.rel = 'stylesheet';
+  cssLink.href = 'modmenu.css';
+  document.head.appendChild(cssLink);
+}
+import('./modmenu.js').then(() => {
+  if (window.__modMenu) window.__modMenu.ensureMounted();
+}).catch(e => console.warn('[MODMENU] play.js modmenu error:', e));
+
 const mb = bytes => (bytes / 1e6).toFixed(1) + ' MB';
 // What actually crosses the network: brotli/opus transport chunks (entry.br) where the pack has them, else the raw file.
 // manifest.total_bytes is the unpacked size on disk (~2.8x larger for Five), which overstated the download.
@@ -564,6 +576,7 @@ async function enter() {
     await Promise.all([full, playing]);
     if (document.pointerLockElement !== canvas) throw new Error('The mouse was not captured.');
     screen('playing', ''); state.timings.playing = performance.now();
+    try { if (window.__modMenu) { window.__modMenu.ensureMounted(); window.__modMenu.onGameEnter?.(); } } catch (e) {}
     if (intro?.started && !intro.finished) introFinish('skip'); // loaded: the start click/key also ends the cinematic
     videoMaster(testMuted() ? 0 : Math.min(1, Number($('volume').value))); // volume50: in-game cinematics follow Master Volume (default 50%)
   } catch (error) {
