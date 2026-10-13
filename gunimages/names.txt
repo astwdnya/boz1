@@ -1,0 +1,68 @@
+CALL OF DUTY: BLACK OPS - ZOMBIES MODE
+Complete Weapons List (Guns) - 39 Weapons
+=========================================
+
+The image of each weapon is a separate PNG file named exactly like the weapon.
+
+--- Pistols (تپانچه) [4] ---
+M1911            (starting pistol)
+PM63
+Python
+CZ75
+
+--- Submachine Guns (اس‌ام‌جی) [4] ---
+MPL
+MP5K
+AK74u
+Spectre
+
+--- Assault Rifles (رایفل تهاجمی) [9] ---
+M14              (starting rifle)
+M16
+FAMAS
+AUG
+Commando
+Galil
+G11
+FN FAL
+AK-47
+
+--- Shotguns (شاتگان) [4] ---
+Olympia
+Stakeout
+SPAS-12
+HS-10
+
+--- Sniper Rifles (اسنایپر) [2] ---
+Dragunov
+L96A1
+
+--- Light Machine Guns (مسلسل سبک) [3] ---
+RPK
+HK21
+M60
+
+--- Specials (اسلحه ویژه) [4] ---
+China Lake       (grenade launcher)
+M72 LAW          (rocket launcher)
+Crossbow
+Ballistic Knife
+
+--- Wonder Weapons (گان‌های وندر) [8] ---
+Ray Gun
+Thundergun
+Winter's Howl
+Wunderwaffe DG-2
+V-R11
+Scavenger
+31-79 JGb215
+Wave Gun         (Zap Guns dual wield)
+
+--- Power-Up Weapon (گان پاورآپ) [1] ---
+Death Machine
+
+Total: 39 guns
+Note: MAC11, Kiparis, PSG1 and ASP were tested but are NOT available in
+BO1 Zombies (MAC11 and Kiparis only have cut Pack-a-Punch textures -
+they never shipped in the mode). Equipment such as Monkey Bomb, Gersch
+Device and QED are not guns, so they are not included.
