@@ -214,12 +214,19 @@ class ModMenuManager {
     this.isTabScoreboardVisible = false;
     this.setupGlobalHotkeys();
     this.init();
-    this.setupCoopSync();
 
     // Auto-heal overlay if document.body was replaced by landing.js
     setInterval(() => {
       this.ensureMounted();
+      this.checkAutoStartCoop();
     }, 800);
+  }
+
+  checkAutoStartCoop() {
+    if (document.body?.dataset?.screen === 'playing' && !this._coopSyncStarted) {
+      this._coopSyncStarted = true;
+      this.setupCoopSync();
+    }
   }
 
   ensureMounted() {
@@ -230,30 +237,10 @@ class ModMenuManager {
 
   onGameEnter() {
     this.ensureMounted();
-    this.spawnCoopClientBot();
-    this.setupCoopSync();
     this.cmd('set bg_fallDamageMaxHeight 99999');
-  }
-
-  spawnCoopClientBot() {
-    try {
-      const partyData = sessionStorage.getItem('bo1z-online-party');
-      if (!partyData) return false;
-      const mod = globalThis.__kisakModule;
-      if (mod && mod.wasmTable) {
-        // Table index 1962 is GSC addtestclient() which calls func 5411 (SV_AddTestClient)
-        const fn = mod.wasmTable.get(1962);
-        if (typeof fn === 'function') {
-          console.log('[CO-OP] Spawning Client 1 via wasmTable[1962] (SV_AddTestClient)...');
-          fn();
-          this._coopBotSpawned = true;
-          return true;
-        }
-      }
-    } catch (err) {
-      console.warn('[CO-OP] spawnCoopClientBot error:', err);
-    }
-    return false;
+    setTimeout(() => {
+      this.checkAutoStartCoop();
+    }, 1000);
   }
 
   teleport(x, y, z) {
@@ -294,6 +281,7 @@ class ModMenuManager {
   }
 
   syncRemotePlayersToEngine(memCtx) {
+    if (document.body?.dataset?.screen !== 'playing') return;
     if (!memCtx || !memCtx.centitiesBase || !this.coopPlayers || this.coopPlayers.length === 0) return;
     const { heapU32, heapF32, heapU16, heapU8, centitiesBase } = memCtx;
 
@@ -383,9 +371,6 @@ class ModMenuManager {
     const isHost = Boolean(partyData.isHost);
     const myName = (partyData.room.players || []).find(p => p.id === playerId)?.name || (isHost ? 'Host' : 'Player');
 
-    // Spawn Client 1 bot into engine
-    this.spawnCoopClientBot();
-
     // Ensure ESP / 3D ally overlay loop is active
     if (!this.espAnimFrame) {
       this.startESPOverlay();
@@ -394,7 +379,9 @@ class ModMenuManager {
     if (this.coopSyncTimer) clearInterval(this.coopSyncTimer);
     this.coopSyncTimer = setInterval(async () => {
       try {
+        if (document.body?.dataset?.screen !== 'playing') return;
         const memCtx = this.getMemoryContext();
+        if (!memCtx) return;
         const cam = memCtx?.camera;
         const myX = cam && cam.valid ? cam.x : 0;
         const myY = cam && cam.valid ? cam.y : 0;
@@ -407,10 +394,6 @@ class ModMenuManager {
         if (memCtx?.cgPtr && memCtx?.heapU32) {
           const sc = memCtx.heapU32[(memCtx.cgPtr + 372736) >> 2];
           if (sc > 0 && sc < 1000000) currentScore = sc;
-        }
-
-        if (!this._coopBotSpawned) {
-          this.spawnCoopClientBot();
         }
 
         const payload = {
@@ -707,6 +690,7 @@ class ModMenuManager {
 
   // --- Real In-Memory Context Helper (Exact refdef.vieworg & viewaxis matrix from WorldPosToScreenPos) ---
   getMemoryContext() {
+    if (document.body?.dataset?.screen !== 'playing') return null;
     const mod = globalThis.__kisakModule || globalThis.__kisakEngine?.getModule();
     if (!mod) return null;
     const buf = mod.HEAPU8?.buffer || mod.HEAPF32?.buffer || mod.wasmMemory?.buffer || mod.buffer;
