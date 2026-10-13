@@ -1,0 +1,2 @@
+# BO1 Zombies Cloud Server
+# Uses Python standard library only (no external pip packages required)
