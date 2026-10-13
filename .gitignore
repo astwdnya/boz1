@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+*.tmp
+
+# Game map pack cache (downloaded automatically by server.py on demand)
+nacht/pack/
+*/pack/
+
+# Environments & IDE
+.vscode/
+.idea/
+.DS_Store
