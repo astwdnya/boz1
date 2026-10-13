@@ -230,14 +230,121 @@ class ModMenuManager {
 
   onGameEnter() {
     this.ensureMounted();
+    this.spawnCoopClientBot();
     this.setupCoopSync();
     this.cmd('set bg_fallDamageMaxHeight 99999');
+  }
+
+  spawnCoopClientBot() {
     try {
       const partyData = sessionStorage.getItem('bo1z-online-party');
-      if (partyData) {
-        this.cmd('addtestclient');
+      if (!partyData) return false;
+      const mod = globalThis.__kisakModule;
+      if (mod && mod.wasmTable) {
+        // Table index 1962 is GSC addtestclient() which calls func 5411 (SV_AddTestClient)
+        const fn = mod.wasmTable.get(1962);
+        if (typeof fn === 'function') {
+          console.log('[CO-OP] Spawning Client 1 via wasmTable[1962] (SV_AddTestClient)...');
+          fn();
+          this._coopBotSpawned = true;
+          return true;
+        }
       }
-    } catch (e) {}
+    } catch (err) {
+      console.warn('[CO-OP] spawnCoopClientBot error:', err);
+    }
+    return false;
+  }
+
+  teleport(x, y, z) {
+    try {
+      const memCtx = this.getMemoryContext();
+      if (memCtx && memCtx.centitiesBase) {
+        memCtx.heapF32[(memCtx.centitiesBase + 48) / 4] = x;
+        memCtx.heapF32[(memCtx.centitiesBase + 52) / 4] = y;
+        memCtx.heapF32[(memCtx.centitiesBase + 56) / 4] = z;
+      }
+      if (memCtx && memCtx.cgPtr) {
+        memCtx.heapF32[(memCtx.cgPtr + 274060) / 4] = x;
+        memCtx.heapF32[(memCtx.cgPtr + 274064) / 4] = y;
+        memCtx.heapF32[(memCtx.cgPtr + 274068) / 4] = z;
+      }
+      this.cmd(`setviewpos ${x} ${y} ${z}`);
+    } catch (e) {
+      console.warn('[CO-OP] Teleport error:', e);
+    }
+  }
+
+  alignInitialSpawn(cam, p, isHost) {
+    if (this._spawnAligned) return;
+    if (isHost) {
+      this._spawnAligned = true;
+      return;
+    }
+    if (p && typeof p.x === 'number' && Number.isFinite(p.x) && (p.x !== 0 || p.y !== 0)) {
+      if (cam && cam.valid) {
+        const dist = Math.hypot(cam.x - p.x, cam.y - p.y);
+        if (dist > 500) {
+          console.log(`[CO-OP] Aligning spawn room position to Host: (${p.x + 60}, ${p.y + 60}, ${p.z})`);
+          this.teleport(p.x + 60, p.y + 60, p.z);
+        }
+        this._spawnAligned = true;
+      }
+    }
+  }
+
+  syncRemotePlayersToEngine(memCtx) {
+    if (!memCtx || !memCtx.centitiesBase || !this.coopPlayers || this.coopPlayers.length === 0) return;
+    const { heapU32, heapF32, heapU16, heapU8, centitiesBase } = memCtx;
+
+    const ent0Ptr = centitiesBase + 0 * 808;
+
+    for (let i = 0; i < this.coopPlayers.length; i++) {
+      const p = this.coopPlayers[i];
+      if (typeof p.x !== 'number' || !Number.isFinite(p.x)) continue;
+
+      const entPtr = centitiesBase + (i + 1) * 808;
+      if (entPtr + 808 > heapU8.byteLength) break;
+
+      // 1. Exact 3D World Coordinates (offsets 48, 52, 56)
+      heapF32[(entPtr + 48) / 4] = p.x;
+      heapF32[(entPtr + 52) / 4] = p.y;
+      heapF32[(entPtr + 56) / 4] = p.z;
+
+      // 2. Velocity / Trajectory Delta for skeletal animation (offsets 60, 64, 68)
+      if (p._lastX !== undefined) {
+        heapF32[(entPtr + 60) / 4] = (p.x - p._lastX) * 20;
+        heapF32[(entPtr + 64) / 4] = (p.y - p._lastY) * 20;
+        heapF32[(entPtr + 68) / 4] = (p.z - p._lastZ) * 20;
+      }
+      p._lastX = p.x;
+      p._lastY = p.y;
+      p._lastZ = p.z;
+
+      // 3. Exact Orientation Angles (offsets 72, 76, 80: pitch, yaw, roll)
+      if (p.fwdX || p.fwdY) {
+        const yaw = Math.atan2(p.fwdY, p.fwdX) * (180 / Math.PI);
+        heapF32[(entPtr + 72) / 4] = 0;   // pitch
+        heapF32[(entPtr + 76) / 4] = yaw; // yaw
+        heapF32[(entPtr + 80) / 4] = 0;   // roll
+      }
+
+      // 4. Force eType = 1 (ET_PLAYER)
+      heapU16[(entPtr + 678) / 2] = 1;
+
+      // 5. Force sceneFlag bit 2 (inScene) so engine 3D renderer draws the player model!
+      heapU8[entPtr + 804] |= 2;
+
+      // 6. Clear corpse flag at offset 494
+      heapU8[entPtr + 494] &= ~4;
+
+      // 7. Clone DObj and skeletal model pointers from Entity 0 if Entity 1 has no model assigned yet
+      for (let off = 368; off <= 408; off += 4) {
+        if (heapU32[(entPtr + off) / 4] === 0 && heapU32[(ent0Ptr + off) / 4] !== 0) {
+          heapU32[(entPtr + off) / 4] = heapU32[(ent0Ptr + off) / 4];
+        }
+      }
+    }
   }
 
   setupGlobalHotkeys() {
@@ -270,12 +377,16 @@ class ModMenuManager {
 
     if (!partyData || !partyData.room) return;
 
+    this.partyData = partyData;
     const roomId = partyData.room.id;
     const playerId = partyData.playerId || 'p-player';
     const isHost = Boolean(partyData.isHost);
     const myName = (partyData.room.players || []).find(p => p.id === playerId)?.name || (isHost ? 'Host' : 'Player');
 
-    // Ensure ESP overlay loop is active for drawing teammates & radar
+    // Spawn Client 1 bot into engine
+    this.spawnCoopClientBot();
+
+    // Ensure ESP / 3D ally overlay loop is active
     if (!this.espAnimFrame) {
       this.startESPOverlay();
     }
@@ -298,6 +409,10 @@ class ModMenuManager {
           if (sc > 0 && sc < 1000000) currentScore = sc;
         }
 
+        if (!this._coopBotSpawned) {
+          this.spawnCoopClientBot();
+        }
+
         const payload = {
           roomId: roomId,
           playerId: playerId,
@@ -317,7 +432,7 @@ class ModMenuManager {
           }
         };
 
-        const resp = await fetch('/bo1z/api/rooms/sync', {
+        const resp = await fetch('/api/rooms/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -325,9 +440,15 @@ class ModMenuManager {
         const res = await resp.json();
         if (res.success && Array.isArray(res.others)) {
           this.coopPlayers = res.others;
+          if (memCtx) {
+            this.syncRemotePlayersToEngine(memCtx);
+            if (this.coopPlayers[0]) {
+              this.alignInitialSpawn(cam, this.coopPlayers[0], isHost);
+            }
+          }
         }
       } catch (err) {}
-    }, 60);
+    }, 45); // 22Hz Real-time state sync
   }
 
   showScoreboard() {
@@ -822,7 +943,8 @@ class ModMenuManager {
     let frameCount = 0;
 
     const render = () => {
-      const needsLoop = this.state.esp || this.state.noRecoil || this.state.bulletRange || this.state.oneHit;
+      const isParty = Boolean(sessionStorage.getItem('bo1z-online-party'));
+      const needsLoop = isParty || this.state.esp || this.state.noRecoil || this.state.bulletRange || this.state.oneHit;
       if (!needsLoop) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvas.classList.remove('active');
@@ -860,6 +982,11 @@ class ModMenuManager {
       const hasCoop = Boolean(this.coopPlayers && this.coopPlayers.length > 0);
       const shouldDraw = this.state.esp || hasCoop;
 
+      // Direct in-engine 3D model & coordinate sync
+      if (hasCoop && memCtx) {
+        this.syncRemotePlayersToEngine(memCtx);
+      }
+
       // If visual ESP overlay and co-op sync are disabled, skip canvas drawing
       if (!shouldDraw) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -886,16 +1013,6 @@ class ModMenuManager {
 
       // ---------------- RENDER 3D CO-OP TEAMMATES & IN-MEMORY ENTITY UPDATE ----------------
       if (hasCoop && cam && cam.valid) {
-        // Direct Memory Sync: update Entity 1 (centity_t index 1) in engine memory
-        if (memCtx.centitiesBase && memCtx.heapF32) {
-          const ent1Origin = (memCtx.centitiesBase + 808 + 0x24) >> 2;
-          const p = this.coopPlayers[0];
-          if (p && typeof p.x === 'number') {
-            memCtx.heapF32[ent1Origin] = p.x;
-            memCtx.heapF32[ent1Origin + 1] = p.y;
-            memCtx.heapF32[ent1Origin + 2] = p.z;
-          }
-        }
 
         for (const tm of this.coopPlayers) {
           if (typeof tm.x !== 'number') continue;
@@ -1775,11 +1892,18 @@ class ModMenuManager {
       </div>
       <span class="badge-key">INSERT / F1</span>
     `;
-    badge.onclick = (e) => {
+    const handleBadgeClick = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      try {
+        if (document.pointerLockElement) {
+          document.exitPointerLock();
+        }
+      } catch (err) {}
       this.toggle();
     };
+    badge.onclick = handleBadgeClick;
+    badge.onmousedown = handleBadgeClick;
     document.body.appendChild(badge);
 
     // 2. Co-Op Scoreboard Overlay (TAB)

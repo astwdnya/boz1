@@ -150,6 +150,11 @@ for (const link of document.querySelectorAll('a[data-pick]')) {
     event.preventDefault();
     const mapId = link.dataset.pick;
     const entry = entries.find(e => e.id === mapId) || { id: mapId, label: mapId };
+    if (window.__lobbyBypassModal) {
+      window.__lobbyBypassModal = false;
+      pick(mapId);
+      return;
+    }
     if (window.__lobbyManager) {
       window.__lobbyManager.openMapModal(entry, () => pick(mapId));
     } else {
@@ -157,4 +162,6 @@ for (const link of document.querySelectorAll('a[data-pick]')) {
     }
   });
 }
+window.pickMap = pick;
+
 

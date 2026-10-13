@@ -423,7 +423,7 @@ export function createEngine(canvas, state) {
       '+set', 'sensitivity', String(settings.sensitivity),
       '+set', 'snd_menu_master', String(settings.volume), '+set', 'r_customMode', `${canvas.width}x${canvas.height}`);
 
-    // Online Multiplayer Co-op: Enable 2 clients and testclient if launched from party lobby
+    // Online Multiplayer Co-op: Enable 4 clients and testclient if launched from party lobby
     try {
       const partyData = sessionStorage.getItem('bo1z-online-party');
       if (partyData) {
@@ -434,11 +434,17 @@ export function createEngine(canvas, state) {
             args[tcIdx + 1] = '1';
           }
           args.splice(args.indexOf('+devmap'), 0,
-            '+set', 'sv_maxclients', '2',
-            '+set', 'party_maxplayers', '2',
-            '+set', 'cl_maxclients', '2',
+            '+set', 'com_maxclients', '4',
+            '+set', 'sv_maxclients', '4',
+            '+set', 'party_maxplayers', '4',
+            '+set', 'cl_maxclients', '4',
+            '+set', 'ui_maxclients', '4',
+            '+set', 'sv_privateClients', '0',
+            '+set', 'onlinegame', '1',
             '+set', 'splitscreen', '0',
-            '+set', 'onlinegame', '1'
+            '+set', 'kisak_testclient_fight', '0',
+            '+set', 'kisak_testclient_passive', '1',
+            '+set', 'kisak_testclient_holdfire', '1'
           );
         }
       }

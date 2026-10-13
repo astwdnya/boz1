@@ -609,13 +609,20 @@ class LobbyManager {
             isHost: this.isHost
           }));
 
-          // Trigger map pick for all players
-          if (typeof this.onOfflineStart === 'function') {
-            this.onOfflineStart();
+          // Trigger map pick for all players using the room's mapId!
+          const targetMapId = room.mapId || (this.currentMap && this.currentMap.id) || 'nacht';
+          console.log(`[LOBBY] Launching synchronized co-op game for map: ${targetMapId}`);
+
+          if (typeof window.pickMap === 'function') {
+            window.pickMap(targetMapId);
           } else {
-            const link = document.querySelector(`a[data-pick="${room.mapId}"]`);
-            if (link) link.click();
-            else window.location.assign(`/bo1z/${room.mapId}`);
+            const link = document.querySelector(`a[data-pick="${targetMapId}"]`);
+            if (link) {
+              window.__lobbyBypassModal = true;
+              link.click();
+            } else {
+              window.location.assign(`/bo1z/${targetMapId}`);
+            }
           }
         }, 600);
       }
