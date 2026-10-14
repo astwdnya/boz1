@@ -420,12 +420,24 @@ export function createEngine(canvas, state) {
       '+set', 'monkeytoy', '0',
       '+set', 'con_restricted', '0',
       '+set', 'developer', '0',
+      '+set', 'sv_maxclients', '4',
+      '+set', 'com_maxclients', '4',
       '+set', 'sensitivity', String(settings.sensitivity),
       '+set', 'snd_menu_master', String(settings.volume), '+set', 'r_customMode', `${canvas.width}x${canvas.height}`);
 
-
-
-    const query = new URLSearchParams(location.search);
+    const partyData = sessionStorage.getItem('bo1z-online-party');
+    if (partyData) {
+      try {
+        const party = JSON.parse(partyData);
+        if (party.roomCode) {
+          let seed = 0;
+          for (let i = 0; i < party.roomCode.length; i++) {
+            seed = (seed * 31 + party.roomCode.charCodeAt(i)) >>> 0;
+          }
+          args.splice(args.indexOf('+devmap'), 0, '+set', 'kisak_parity_seed', String(seed));
+        }
+      } catch (e) {}
+    }
     const perfMode = query.get('quality') !== 'high' && localStorage.getItem('bo1z-quality') !== 'high';
     if (perfMode) {
       args.splice(args.indexOf('+devmap'), 0,

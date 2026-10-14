@@ -226,6 +226,12 @@ class ModMenuManager {
     if (document.body?.dataset?.screen === 'playing' && !this._coopSyncStarted) {
       this._coopSyncStarted = true;
       this.setupCoopSync();
+      setTimeout(() => {
+        const isParty = Boolean(sessionStorage.getItem('bo1z-online-party'));
+        if (isParty) {
+          this.spawnInGameTestClient();
+        }
+      }, 500);
     }
   }
 
@@ -270,10 +276,99 @@ class ModMenuManager {
     }
   }
 
+  spawnInGameTestClient() {
+    if (this._testClientSpawned) return;
+    try {
+      const mod = globalThis.__kisakModule || globalThis.__kisakEngine?.getModule();
+      const table = mod?.wasmExports?.['__indirect_function_table'] || mod?.wasmTable;
+      if (table) {
+        const fn = table.get(1962); // GScr_AddTestClient() -> SV_AddTestClient()
+        if (typeof fn === 'function') {
+          console.log('[CO-OP 3D] Spawning official Call of Duty 3D player entity via GScr_AddTestClient (func 10424)...');
+          const entPtr = fn();
+          this._testClientSpawned = true;
+          this._testClientEnt = entPtr || (87604176 + 760);
+          console.log('[CO-OP 3D] Official Call of Duty 3D player entity spawned at address:', this._testClientEnt);
+        } else {
+          console.warn('[CO-OP 3D] wasmTable[1962] is not a function');
+        }
+      }
+    } catch (e) {
+      console.warn('[CO-OP 3D] GScr_AddTestClient exception:', e);
+    }
+  }
+
   syncRemotePlayersToEngine(memCtx) {
-    // Teammate 3D visual rendering is handled completely safely by drawTacticalSoldier
-    // on the 3D perspective overlay to prevent mutating CGame snapshot memory and avoid
-    // any CG_TransitionSnapshot assertion crashes.
+    if (!this.coopPlayers || !this.coopPlayers.length) return;
+    const tm = this.coopPlayers[0];
+    if (!tm || typeof tm.x !== 'number' || !Number.isFinite(tm.x)) return;
+
+    if (!this._testClientSpawned) {
+      this.spawnInGameTestClient();
+    }
+
+    const mod = globalThis.__kisakModule || globalThis.__kisakEngine?.getModule();
+    const heapF32 = mod?.HEAPF32;
+    const heapU8 = mod?.HEAPU8;
+    const heapU16 = mod?.HEAPU16;
+    const heapI32 = mod?.HEAP32 || (heapF32 ? new Int32Array(heapF32.buffer) : null);
+    if (!heapF32 || !heapU8 || !heapI32) return;
+
+    const ent = this._testClientEnt || (87604176 + 760);
+    if (ent + 760 > heapF32.buffer.byteLength) return;
+
+    // Smooth delta velocity for real 3D running / walking animation
+    const now = performance.now();
+    const dt = Math.max(0.016, (now - (this._lastTmTime || now)) / 1000);
+    this._lastTmTime = now;
+    const vx = (tm.x - (this._lastTmX ?? tm.x)) / dt;
+    const vy = (tm.y - (this._lastTmY ?? tm.y)) / dt;
+    const vz = (tm.z - (this._lastTmZ ?? tm.z)) / dt;
+    this._lastTmX = tm.x;
+    this._lastTmY = tm.y;
+    this._lastTmZ = tm.z;
+
+    const isMoving = Math.hypot(vx, vy) > 5;
+
+    // 1. pos.trBase (origin x, y, z at offset 24, 28, 32)
+    heapF32[(ent + 24) >> 2] = tm.x;
+    heapF32[(ent + 28) >> 2] = tm.y;
+    heapF32[(ent + 32) >> 2] = tm.z;
+
+    // 2. pos.trDelta (velocity vx, vy, vz at offset 36, 40, 44)
+    heapF32[(ent + 36) >> 2] = vx;
+    heapF32[(ent + 40) >> 2] = vy;
+    heapF32[(ent + 44) >> 2] = vz;
+
+    // 3. pos.trType (offset 12): 2 = TR_INTERPOLATE, 1 = TR_STATIONARY
+    heapI32[(ent + 12) >> 2] = isMoving ? 2 : 1;
+
+    // 4. r.currentOrigin (origin x, y, z at offset 676, 680, 684)
+    heapF32[(ent + 676) >> 2] = tm.x;
+    heapF32[(ent + 680) >> 2] = tm.y;
+    heapF32[(ent + 684) >> 2] = tm.z;
+
+    // 5. r.currentAngles (pitch, yaw, roll at offset 688, 692, 696)
+    heapF32[(ent + 688) >> 2] = tm.pitch || 0;
+    heapF32[(ent + 692) >> 2] = tm.yaw || 0;
+    heapF32[(ent + 696) >> 2] = tm.roll || 0;
+
+    // 6. apos.trBase (offset 48, 52, 56)
+    heapF32[(ent + 48) >> 2] = tm.pitch || 0;
+    heapF32[(ent + 52) >> 2] = tm.yaw || 0;
+    heapF32[(ent + 56) >> 2] = tm.roll || 0;
+
+    // 7. Entity Type & Active Flag
+    heapI32[(ent + 4) >> 2] = 1; // ET_PLAYER
+    heapU8[ent + 488] = 1;       // r.inuse = 1
+
+    // 8. Ensure character 3D model index is attached from player 0 if not yet set
+    if (heapU16) {
+      const localModel = heapU16[(87604176 + 348) >> 1];
+      if (localModel > 0 && heapU16[(ent + 348) >> 1] === 0) {
+        heapU16[(ent + 348) >> 1] = localModel;
+      }
+    }
   }
 
   setupGlobalHotkeys() {
@@ -879,187 +974,7 @@ class ModMenuManager {
     this.updateCardUI('esp', this.state.esp);
   }
 
-  // --- 3D Military Soldier Character Skin & Tactical Model Renderer ---
-  drawTacticalSoldier(ctx, cx, headY, feetY, bHeight, bWidth, isHost, tm) {
-    ctx.save();
 
-    const scale = Math.max(0.2, bHeight / 68); // 68 units = standard player height
-    const headRadius = Math.max(3.5, 5.5 * scale);
-    const shoulderWidth = Math.max(8, 16 * scale);
-    const neckY = headY + headRadius * 2;
-    const waistY = headY + bHeight * 0.52;
-    const kneeY = headY + bHeight * 0.76;
-
-    const primaryCamo = isHost ? '#47553b' : '#3e4a3d'; // US Marine Olive Drab
-    const vestColor = '#2d3326';   // Tactical chest rig
-    const helmetColor = '#3f4733'; // M1 Steel Helmet
-    const skinColor = '#d2a679';   // Marine face & hands
-    const gunColor = '#1e2328';    // Weapon
-    const glowColor = isHost ? 'rgba(245, 158, 11, 0.85)' : 'rgba(16, 185, 129, 0.85)';
-
-    // 0. Soft Allied Aura
-    ctx.shadowColor = glowColor;
-    ctx.shadowBlur = Math.min(16, Math.max(4, 8 * scale));
-
-    // 1. LEGS & COMBAT BOOTS
-    const legWidth = Math.max(2.5, 4.5 * scale);
-    const leftHipX = cx - shoulderWidth * 0.28;
-    const rightHipX = cx + shoulderWidth * 0.28;
-
-    // Left Leg
-    ctx.fillStyle = primaryCamo;
-    ctx.beginPath();
-    ctx.moveTo(leftHipX - legWidth * 0.5, waistY);
-    ctx.lineTo(leftHipX - legWidth * 0.6, kneeY);
-    ctx.lineTo(leftHipX - legWidth * 0.4, feetY - 2 * scale);
-    ctx.lineTo(leftHipX + legWidth * 0.4, feetY - 2 * scale);
-    ctx.lineTo(leftHipX + legWidth * 0.5, kneeY);
-    ctx.lineTo(leftHipX + legWidth * 0.5, waistY);
-    ctx.closePath();
-    ctx.fill();
-
-    // Right Leg
-    ctx.beginPath();
-    ctx.moveTo(rightHipX - legWidth * 0.5, waistY);
-    ctx.lineTo(rightHipX - legWidth * 0.5, kneeY);
-    ctx.lineTo(rightHipX - legWidth * 0.4, feetY - 2 * scale);
-    ctx.lineTo(rightHipX + legWidth * 0.4, feetY - 2 * scale);
-    ctx.lineTo(rightHipX + legWidth * 0.6, kneeY);
-    ctx.lineTo(rightHipX + legWidth * 0.5, waistY);
-    ctx.closePath();
-    ctx.fill();
-
-    // Combat Jump Boots
-    ctx.fillStyle = '#181b18';
-    ctx.beginPath();
-    ctx.roundRect(leftHipX - legWidth * 0.7, feetY - 4 * scale, legWidth * 1.5, 4 * scale + 1, 1);
-    ctx.roundRect(rightHipX - legWidth * 0.6, feetY - 4 * scale, legWidth * 1.5, 4 * scale + 1, 1);
-    ctx.fill();
-
-    // Knee Protectors
-    ctx.fillStyle = vestColor;
-    ctx.fillRect(leftHipX - legWidth * 0.5, kneeY - 2 * scale, legWidth, 4 * scale);
-    ctx.fillRect(rightHipX - legWidth * 0.5, kneeY - 2 * scale, legWidth, 4 * scale);
-
-    // 2. TORSO, JACKET & TACTICAL LOADOUT VEST
-    ctx.fillStyle = primaryCamo;
-    ctx.beginPath();
-    ctx.moveTo(cx - shoulderWidth * 0.5, neckY);
-    ctx.lineTo(cx + shoulderWidth * 0.5, neckY);
-    ctx.lineTo(cx + shoulderWidth * 0.38, waistY);
-    ctx.lineTo(cx - shoulderWidth * 0.38, waistY);
-    ctx.closePath();
-    ctx.fill();
-
-    // Modular Tactical Plate Carrier
-    ctx.fillStyle = vestColor;
-    const vestTop = neckY + 1 * scale;
-    const vestHeight = (waistY - vestTop) * 0.88;
-    const vestWidth = shoulderWidth * 0.75;
-    ctx.beginPath();
-    ctx.roundRect(cx - vestWidth * 0.5, vestTop, vestWidth, vestHeight, 2);
-    ctx.fill();
-
-    // Ammo Pouches
-    ctx.fillStyle = '#1c2017';
-    const pouchW = vestWidth * 0.24;
-    const pouchH = vestHeight * 0.35;
-    const pouchY = vestTop + vestHeight * 0.45;
-    ctx.fillRect(cx - vestWidth * 0.38, pouchY, pouchW, pouchH);
-    ctx.fillRect(cx - pouchW * 0.5, pouchY, pouchW, pouchH);
-    ctx.fillRect(cx + vestWidth * 0.14, pouchY, pouchW, pouchH);
-
-    // Shoulder Radio & Antenna
-    ctx.fillStyle = '#111311';
-    ctx.fillRect(cx - shoulderWidth * 0.42, neckY - 2 * scale, 3 * scale, 8 * scale);
-    ctx.beginPath();
-    ctx.strokeStyle = '#222';
-    ctx.lineWidth = 1;
-    ctx.moveTo(cx - shoulderWidth * 0.4, neckY - 2 * scale);
-    ctx.lineTo(cx - shoulderWidth * 0.42, neckY - 8 * scale);
-    ctx.stroke();
-
-    // 3. ARMS & WEAPON
-    const armWidth = Math.max(2, 3.8 * scale);
-    const lShX = cx - shoulderWidth * 0.48;
-    const rShX = cx + shoulderWidth * 0.48;
-    const handX = cx + (tm.fwdX > 0 ? 3 : -3) * scale;
-    const handY = neckY + vestHeight * 0.55;
-
-    // Left Arm
-    ctx.fillStyle = primaryCamo;
-    ctx.beginPath();
-    ctx.moveTo(lShX, neckY);
-    ctx.lineTo(handX - 4 * scale, handY);
-    ctx.lineTo(handX - 2 * scale, handY + armWidth);
-    ctx.lineTo(lShX + armWidth, neckY + 4 * scale);
-    ctx.closePath();
-    ctx.fill();
-
-    // Right Arm
-    ctx.beginPath();
-    ctx.moveTo(rShX, neckY);
-    ctx.lineTo(handX + 6 * scale, handY + 1 * scale);
-    ctx.lineTo(handX + 4 * scale, handY + armWidth + 1 * scale);
-    ctx.lineTo(rShX - armWidth, neckY + 4 * scale);
-    ctx.closePath();
-    ctx.fill();
-
-    // Combat Gloves
-    ctx.fillStyle = '#222520';
-    ctx.beginPath();
-    ctx.arc(handX - 3 * scale, handY + 2 * scale, Math.max(1.5, 2.5 * scale), 0, Math.PI * 2);
-    ctx.arc(handX + 5 * scale, handY + 2 * scale, Math.max(1.5, 2.5 * scale), 0, Math.PI * 2);
-    ctx.fill();
-
-    // 4. WEAPON (Thompson / M16 Assault Rifle)
-    ctx.fillStyle = gunColor;
-    const gunLen = Math.max(12, 22 * scale);
-    const gunThick = Math.max(2, 3.2 * scale);
-    const aimDir = tm.fwdX < 0 ? -1 : 1;
-    const barrelX = handX + (aimDir * gunLen * 0.65);
-    const stockX = handX - (aimDir * gunLen * 0.35);
-
-    ctx.beginPath();
-    ctx.rect(Math.min(barrelX, stockX), handY, Math.abs(barrelX - stockX), gunThick);
-    ctx.fill();
-    ctx.fillStyle = '#3a2b1c';
-    ctx.fillRect(stockX - (aimDir > 0 ? 3 * scale : 0), handY - 1 * scale, 3 * scale, gunThick * 1.8);
-    ctx.fillStyle = '#15171a';
-    ctx.fillRect(handX - 1 * scale, handY + gunThick, 3 * scale, 5 * scale);
-    ctx.fillStyle = '#64748b';
-    ctx.fillRect(barrelX, handY + 0.5 * scale, 2 * scale, gunThick * 0.6);
-
-    // 5. HEAD & M1 STEEL HELMET
-    ctx.fillStyle = skinColor;
-    ctx.beginPath();
-    ctx.arc(cx, headY + headRadius * 1.1, headRadius * 0.78, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#1e293b';
-    ctx.fillRect(cx - headRadius * 0.45, headY + headRadius * 0.95, headRadius * 0.35, headRadius * 0.25);
-    ctx.fillRect(cx + headRadius * 0.1, headY + headRadius * 0.95, headRadius * 0.35, headRadius * 0.25);
-
-    ctx.fillStyle = helmetColor;
-    ctx.beginPath();
-    ctx.arc(cx, headY + headRadius * 0.75, headRadius * 1.05, Math.PI * 0.85, Math.PI * 2.15);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.strokeStyle = '#272c20';
-    ctx.lineWidth = Math.max(1.5, 2.2 * scale);
-    ctx.beginPath();
-    ctx.moveTo(cx - headRadius * 1.25, headY + headRadius * 0.9);
-    ctx.quadraticCurveTo(cx, headY + headRadius * 0.75, cx + headRadius * 1.25, headY + headRadius * 0.9);
-    ctx.stroke();
-
-    // 6. ALLIED CONTOUR
-    ctx.strokeStyle = glowColor;
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    ctx.restore();
-  }
 
   // --- Off-Screen Allied Radar / Directional Pointer ---
   drawOffscreenIndicator(ctx, tm, cam, w, h) {
@@ -1189,7 +1104,11 @@ class ModMenuManager {
 
       const cam = memCtx?.camera;
 
-      // ---------------- RENDER 3D CO-OP TEAMMATES & IN-MEMORY ENTITY UPDATE ----------------
+      // ---------------- RENDER 3D CO-OP TEAMMATES & IN-ENGINE 3D ENTITY SYNC ----------------
+      if (hasCoop) {
+        this.syncRemotePlayersToEngine(memCtx);
+      }
+
       if (hasCoop && cam && cam.valid) {
 
         for (const tm of this.coopPlayers) {
@@ -1207,9 +1126,6 @@ class ModMenuManager {
             const bHeight = Math.max(20, feet.y - head.y);
             const bWidth = Math.max(12, bHeight * 0.45);
             const bTop = head.y;
-
-            // 1. Draw Real 3D Tactical Soldier Character Model & Uniform
-            this.drawTacticalSoldier(ctx, feet.x, head.y, feet.y, bHeight, bWidth, tm.isHost, tm);
 
             ctx.save();
             // 2. Snapline to feet
