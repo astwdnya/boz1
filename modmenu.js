@@ -248,17 +248,6 @@ class ModMenuManager {
       const rx = Math.round(x);
       const ry = Math.round(y);
       const rz = Math.round(z);
-      const memCtx = this.getMemoryContext();
-      if (memCtx && memCtx.centitiesBase) {
-        memCtx.heapF32[(memCtx.centitiesBase + 48) / 4] = rx;
-        memCtx.heapF32[(memCtx.centitiesBase + 52) / 4] = ry;
-        memCtx.heapF32[(memCtx.centitiesBase + 56) / 4] = rz;
-      }
-      if (memCtx && memCtx.cgPtr) {
-        memCtx.heapF32[(memCtx.cgPtr + 274060) / 4] = rx;
-        memCtx.heapF32[(memCtx.cgPtr + 274064) / 4] = ry;
-        memCtx.heapF32[(memCtx.cgPtr + 274068) / 4] = rz;
-      }
       // setviewpos requires 4 arguments in Black Ops: x y z yaw
       this.cmd(`setviewpos ${rx} ${ry} ${rz} 0`);
     } catch (e) {
@@ -282,99 +271,9 @@ class ModMenuManager {
   }
 
   syncRemotePlayersToEngine(memCtx) {
-    if (document.body?.dataset?.screen !== 'playing') return;
-    if (!memCtx || !memCtx.centitiesBase || !this.coopPlayers || this.coopPlayers.length === 0) return;
-    const { heapU32, heapF32, heapU16, heapU8, centitiesBase } = memCtx;
-
-    // 0. Connect Entity 1 to engine's 3D DObj client model map:
-    // clientObjMap is at address 0x80f7ae0 (Func 297 Com_GetClientDObj)
-    const objMapWord = 0x80f7ae0 >> 1;
-    if (objMapWord + 128 < heapU16.length) {
-      let activeHandle = heapU16[objMapWord]; // check ent 0
-      if (!activeHandle) {
-        for (let k = 2; k < 64; k++) {
-          if (heapU16[objMapWord + k] > 0) {
-            activeHandle = heapU16[objMapWord + k];
-            break;
-          }
-        }
-      }
-      if (activeHandle > 0) {
-        heapU16[objMapWord + 1] = activeHandle;
-      }
-    }
-
-    const ent0Ptr = centitiesBase + 0 * 808;
-
-    for (let i = 0; i < this.coopPlayers.length; i++) {
-      const p = this.coopPlayers[i];
-      if (typeof p.x !== 'number' || !Number.isFinite(p.x)) continue;
-
-      const entNum = i + 1;
-      const entPtr = centitiesBase + entNum * 808;
-      if (entPtr + 808 > heapU8.byteLength) break;
-
-      // 1. Exact 3D World Coordinates (offsets 48, 52, 56)
-      heapF32[(entPtr + 48) / 4] = p.x;
-      heapF32[(entPtr + 52) / 4] = p.y;
-      heapF32[(entPtr + 56) / 4] = p.z;
-
-      // cpose_t.actualOrigin (offsets 148, 152, 156)
-      heapF32[(entPtr + 148) / 4] = p.x;
-      heapF32[(entPtr + 152) / 4] = p.y;
-      heapF32[(entPtr + 156) / 4] = p.z;
-
-      // pos.trBase (offsets 568, 572, 576)
-      heapF32[(entPtr + 568) / 4] = p.x;
-      heapF32[(entPtr + 572) / 4] = p.y;
-      heapF32[(entPtr + 576) / 4] = p.z;
-
-      // 2. Velocity / Trajectory Delta for skeletal animation (offsets 60, 64, 68 and 580, 584, 588)
-      const vx = p._lastX !== undefined ? (p.x - p._lastX) * 20 : 0;
-      const vy = p._lastY !== undefined ? (p.y - p._lastY) * 20 : 0;
-      const vz = p._lastZ !== undefined ? (p.z - p._lastZ) * 20 : 0;
-      heapF32[(entPtr + 580) / 4] = vx;
-      heapF32[(entPtr + 584) / 4] = vy;
-      heapF32[(entPtr + 588) / 4] = vz;
-
-      p._lastX = p.x;
-      p._lastY = p.y;
-      p._lastZ = p.z;
-
-      // 3. Exact Orientation Angles (offsets 60, 64, 68, 392, 656, 660, 664)
-      let yaw = 0;
-      if (p.fwdX || p.fwdY) {
-        yaw = Math.atan2(p.fwdY, p.fwdX) * (180 / Math.PI);
-        heapF32[(entPtr + 60) / 4] = 0;   // pitch
-        heapF32[(entPtr + 64) / 4] = yaw; // yaw
-        heapF32[(entPtr + 68) / 4] = 0;   // roll
-
-        heapF32[(entPtr + 656) / 4] = 0;   // apos.trBase pitch
-        heapF32[(entPtr + 660) / 4] = yaw; // apos.trBase yaw
-        heapF32[(entPtr + 664) / 4] = 0;   // apos.trBase roll
-        heapF32[(entPtr + 392) / 4] = yaw; // cpose_t.angles
-      }
-
-      // 4. Entity number binding in current and nextState (488, 492)
-      heapU32[(entPtr + 488) / 4] = entNum;
-      heapU32[(entPtr + 492) / 4] = entNum;
-
-      // 5. Force eType = 1 (ET_PLAYER)
-      heapU16[(entPtr + 678) / 2] = 1;
-
-      // 6. Force sceneFlag bit 2 (inScene) so engine 3D renderer draws the player model!
-      heapU8[entPtr + 804] |= 2;
-
-      // 7. Clear corpse flag at offset 494
-      heapU8[entPtr + 494] &= ~4;
-
-      // 8. Clone DObj and skeletal model pointers from Entity 0 if Entity 1 has no model assigned yet
-      for (let off = 368; off <= 420; off += 4) {
-        if (heapU32[(entPtr + off) / 4] === 0 && heapU32[(ent0Ptr + off) / 4] !== 0) {
-          heapU32[(entPtr + off) / 4] = heapU32[(ent0Ptr + off) / 4];
-        }
-      }
-    }
+    // Teammate 3D visual rendering is handled completely safely by drawTacticalSoldier
+    // on the 3D perspective overlay to prevent mutating CGame snapshot memory and avoid
+    // any CG_TransitionSnapshot assertion crashes.
   }
 
   setupGlobalHotkeys() {
