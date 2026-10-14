@@ -245,18 +245,22 @@ class ModMenuManager {
 
   teleport(x, y, z) {
     try {
+      const rx = Math.round(x);
+      const ry = Math.round(y);
+      const rz = Math.round(z);
       const memCtx = this.getMemoryContext();
       if (memCtx && memCtx.centitiesBase) {
-        memCtx.heapF32[(memCtx.centitiesBase + 48) / 4] = x;
-        memCtx.heapF32[(memCtx.centitiesBase + 52) / 4] = y;
-        memCtx.heapF32[(memCtx.centitiesBase + 56) / 4] = z;
+        memCtx.heapF32[(memCtx.centitiesBase + 48) / 4] = rx;
+        memCtx.heapF32[(memCtx.centitiesBase + 52) / 4] = ry;
+        memCtx.heapF32[(memCtx.centitiesBase + 56) / 4] = rz;
       }
       if (memCtx && memCtx.cgPtr) {
-        memCtx.heapF32[(memCtx.cgPtr + 274060) / 4] = x;
-        memCtx.heapF32[(memCtx.cgPtr + 274064) / 4] = y;
-        memCtx.heapF32[(memCtx.cgPtr + 274068) / 4] = z;
+        memCtx.heapF32[(memCtx.cgPtr + 274060) / 4] = rx;
+        memCtx.heapF32[(memCtx.cgPtr + 274064) / 4] = ry;
+        memCtx.heapF32[(memCtx.cgPtr + 274068) / 4] = rz;
       }
-      this.cmd(`setviewpos ${x} ${y} ${z}`);
+      // setviewpos requires 4 arguments in Black Ops: x y z yaw
+      this.cmd(`setviewpos ${rx} ${ry} ${rz} 0`);
     } catch (e) {
       console.warn('[CO-OP] Teleport error:', e);
     }
@@ -270,11 +274,8 @@ class ModMenuManager {
     }
     if (p && typeof p.x === 'number' && Number.isFinite(p.x) && (p.x !== 0 || p.y !== 0)) {
       if (cam && cam.valid) {
-        const dist = Math.hypot(cam.x - p.x, cam.y - p.y);
-        if (dist > 500) {
-          console.log(`[CO-OP] Aligning spawn room position to Host: (${p.x + 60}, ${p.y + 60}, ${p.z})`);
-          this.teleport(p.x + 60, p.y + 60, p.z);
-        }
+        console.log(`[CO-OP] Teleporting to Host starting room: (${p.x + 60}, ${p.y}, ${p.z})`);
+        this.teleport(p.x + 60, p.y, p.z);
         this._spawnAligned = true;
       }
     }
@@ -285,13 +286,32 @@ class ModMenuManager {
     if (!memCtx || !memCtx.centitiesBase || !this.coopPlayers || this.coopPlayers.length === 0) return;
     const { heapU32, heapF32, heapU16, heapU8, centitiesBase } = memCtx;
 
+    // 0. Connect Entity 1 to engine's 3D DObj client model map:
+    // clientObjMap is at address 0x80f7ae0 (Func 297 Com_GetClientDObj)
+    const objMapWord = 0x80f7ae0 >> 1;
+    if (objMapWord + 128 < heapU16.length) {
+      let activeHandle = heapU16[objMapWord]; // check ent 0
+      if (!activeHandle) {
+        for (let k = 2; k < 64; k++) {
+          if (heapU16[objMapWord + k] > 0) {
+            activeHandle = heapU16[objMapWord + k];
+            break;
+          }
+        }
+      }
+      if (activeHandle > 0) {
+        heapU16[objMapWord + 1] = activeHandle;
+      }
+    }
+
     const ent0Ptr = centitiesBase + 0 * 808;
 
     for (let i = 0; i < this.coopPlayers.length; i++) {
       const p = this.coopPlayers[i];
       if (typeof p.x !== 'number' || !Number.isFinite(p.x)) continue;
 
-      const entPtr = centitiesBase + (i + 1) * 808;
+      const entNum = i + 1;
+      const entPtr = centitiesBase + entNum * 808;
       if (entPtr + 808 > heapU8.byteLength) break;
 
       // 1. Exact 3D World Coordinates (offsets 48, 52, 56)
@@ -299,35 +319,57 @@ class ModMenuManager {
       heapF32[(entPtr + 52) / 4] = p.y;
       heapF32[(entPtr + 56) / 4] = p.z;
 
-      // 2. Velocity / Trajectory Delta for skeletal animation (offsets 60, 64, 68)
-      if (p._lastX !== undefined) {
-        heapF32[(entPtr + 60) / 4] = (p.x - p._lastX) * 20;
-        heapF32[(entPtr + 64) / 4] = (p.y - p._lastY) * 20;
-        heapF32[(entPtr + 68) / 4] = (p.z - p._lastZ) * 20;
-      }
+      // cpose_t.actualOrigin (offsets 148, 152, 156)
+      heapF32[(entPtr + 148) / 4] = p.x;
+      heapF32[(entPtr + 152) / 4] = p.y;
+      heapF32[(entPtr + 156) / 4] = p.z;
+
+      // pos.trBase (offsets 568, 572, 576)
+      heapF32[(entPtr + 568) / 4] = p.x;
+      heapF32[(entPtr + 572) / 4] = p.y;
+      heapF32[(entPtr + 576) / 4] = p.z;
+
+      // 2. Velocity / Trajectory Delta for skeletal animation (offsets 60, 64, 68 and 580, 584, 588)
+      const vx = p._lastX !== undefined ? (p.x - p._lastX) * 20 : 0;
+      const vy = p._lastY !== undefined ? (p.y - p._lastY) * 20 : 0;
+      const vz = p._lastZ !== undefined ? (p.z - p._lastZ) * 20 : 0;
+      heapF32[(entPtr + 580) / 4] = vx;
+      heapF32[(entPtr + 584) / 4] = vy;
+      heapF32[(entPtr + 588) / 4] = vz;
+
       p._lastX = p.x;
       p._lastY = p.y;
       p._lastZ = p.z;
 
-      // 3. Exact Orientation Angles (offsets 72, 76, 80: pitch, yaw, roll)
+      // 3. Exact Orientation Angles (offsets 60, 64, 68, 392, 656, 660, 664)
+      let yaw = 0;
       if (p.fwdX || p.fwdY) {
-        const yaw = Math.atan2(p.fwdY, p.fwdX) * (180 / Math.PI);
-        heapF32[(entPtr + 72) / 4] = 0;   // pitch
-        heapF32[(entPtr + 76) / 4] = yaw; // yaw
-        heapF32[(entPtr + 80) / 4] = 0;   // roll
+        yaw = Math.atan2(p.fwdY, p.fwdX) * (180 / Math.PI);
+        heapF32[(entPtr + 60) / 4] = 0;   // pitch
+        heapF32[(entPtr + 64) / 4] = yaw; // yaw
+        heapF32[(entPtr + 68) / 4] = 0;   // roll
+
+        heapF32[(entPtr + 656) / 4] = 0;   // apos.trBase pitch
+        heapF32[(entPtr + 660) / 4] = yaw; // apos.trBase yaw
+        heapF32[(entPtr + 664) / 4] = 0;   // apos.trBase roll
+        heapF32[(entPtr + 392) / 4] = yaw; // cpose_t.angles
       }
 
-      // 4. Force eType = 1 (ET_PLAYER)
+      // 4. Entity number binding in current and nextState (488, 492)
+      heapU32[(entPtr + 488) / 4] = entNum;
+      heapU32[(entPtr + 492) / 4] = entNum;
+
+      // 5. Force eType = 1 (ET_PLAYER)
       heapU16[(entPtr + 678) / 2] = 1;
 
-      // 5. Force sceneFlag bit 2 (inScene) so engine 3D renderer draws the player model!
+      // 6. Force sceneFlag bit 2 (inScene) so engine 3D renderer draws the player model!
       heapU8[entPtr + 804] |= 2;
 
-      // 6. Clear corpse flag at offset 494
+      // 7. Clear corpse flag at offset 494
       heapU8[entPtr + 494] &= ~4;
 
-      // 7. Clone DObj and skeletal model pointers from Entity 0 if Entity 1 has no model assigned yet
-      for (let off = 368; off <= 408; off += 4) {
+      // 8. Clone DObj and skeletal model pointers from Entity 0 if Entity 1 has no model assigned yet
+      for (let off = 368; off <= 420; off += 4) {
         if (heapU32[(entPtr + off) / 4] === 0 && heapU32[(ent0Ptr + off) / 4] !== 0) {
           heapU32[(entPtr + off) / 4] = heapU32[(ent0Ptr + off) / 4];
         }
@@ -396,6 +438,13 @@ class ModMenuManager {
           if (sc > 0 && sc < 1000000) currentScore = sc;
         }
 
+        let liveZombies = [];
+        try {
+          if (isHost) {
+            liveZombies = this.getLiveZombies(memCtx);
+          }
+        } catch (e) {}
+
         const payload = {
           roomId: roomId,
           playerId: playerId,
@@ -411,7 +460,8 @@ class ModMenuManager {
             health: 100,
             score: currentScore,
             kills: 0,
-            headshots: 0
+            headshots: 0,
+            zombies: isHost ? liveZombies.slice(0, 24).map(z => ({ id: z.id, x: Math.round(z.x), y: Math.round(z.y), z: Math.round(z.z), dist: z.distMeters })) : []
           }
         };
 
@@ -423,6 +473,10 @@ class ModMenuManager {
         const res = await resp.json();
         if (res.success && Array.isArray(res.others)) {
           this.coopPlayers = res.others;
+          const hostPlayer = this.coopPlayers.find(p => p.isHost);
+          if (hostPlayer && Array.isArray(hostPlayer.zombies) && hostPlayer.zombies.length > 0) {
+            this.hostSyncedZombies = hostPlayer.zombies;
+          }
           if (memCtx) {
             this.syncRemotePlayersToEngine(memCtx);
             if (this.coopPlayers[0]) {
@@ -773,6 +827,26 @@ class ModMenuManager {
   getLiveZombies(memCtx) {
     if (!memCtx || !memCtx.camera.valid || !memCtx.centitiesBase) return [];
     const { heapF32, heapU16, heapU8, centitiesBase, camera } = memCtx;
+
+    // Co-op multiplayer: If Client has synced zombies from Host, return them for shared match state
+    if (this.hostSyncedZombies && this.hostSyncedZombies.length > 0 && this.partyData && !this.partyData.isHost) {
+      return this.hostSyncedZombies.map(hz => {
+        const dx = hz.x - camera.x;
+        const dy = hz.y - camera.y;
+        const dz = hz.z - camera.z;
+        const dist = Math.hypot(dx, dy, dz);
+        return {
+          id: hz.id,
+          x: hz.x,
+          y: hz.y,
+          z: hz.z,
+          distUnits: dist,
+          distMeters: Math.round(dist * 0.0254),
+          eType: 17
+        };
+      });
+    }
+
     const zombies = [];
 
     // Scan entities: 1 to 1024 (Entity 0 is the local player; 1..1023 are world entities)
@@ -906,6 +980,227 @@ class ModMenuManager {
     this.updateCardUI('esp', this.state.esp);
   }
 
+  // --- 3D Military Soldier Character Skin & Tactical Model Renderer ---
+  drawTacticalSoldier(ctx, cx, headY, feetY, bHeight, bWidth, isHost, tm) {
+    ctx.save();
+
+    const scale = Math.max(0.2, bHeight / 68); // 68 units = standard player height
+    const headRadius = Math.max(3.5, 5.5 * scale);
+    const shoulderWidth = Math.max(8, 16 * scale);
+    const neckY = headY + headRadius * 2;
+    const waistY = headY + bHeight * 0.52;
+    const kneeY = headY + bHeight * 0.76;
+
+    const primaryCamo = isHost ? '#47553b' : '#3e4a3d'; // US Marine Olive Drab
+    const vestColor = '#2d3326';   // Tactical chest rig
+    const helmetColor = '#3f4733'; // M1 Steel Helmet
+    const skinColor = '#d2a679';   // Marine face & hands
+    const gunColor = '#1e2328';    // Weapon
+    const glowColor = isHost ? 'rgba(245, 158, 11, 0.85)' : 'rgba(16, 185, 129, 0.85)';
+
+    // 0. Soft Allied Aura
+    ctx.shadowColor = glowColor;
+    ctx.shadowBlur = Math.min(16, Math.max(4, 8 * scale));
+
+    // 1. LEGS & COMBAT BOOTS
+    const legWidth = Math.max(2.5, 4.5 * scale);
+    const leftHipX = cx - shoulderWidth * 0.28;
+    const rightHipX = cx + shoulderWidth * 0.28;
+
+    // Left Leg
+    ctx.fillStyle = primaryCamo;
+    ctx.beginPath();
+    ctx.moveTo(leftHipX - legWidth * 0.5, waistY);
+    ctx.lineTo(leftHipX - legWidth * 0.6, kneeY);
+    ctx.lineTo(leftHipX - legWidth * 0.4, feetY - 2 * scale);
+    ctx.lineTo(leftHipX + legWidth * 0.4, feetY - 2 * scale);
+    ctx.lineTo(leftHipX + legWidth * 0.5, kneeY);
+    ctx.lineTo(leftHipX + legWidth * 0.5, waistY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Right Leg
+    ctx.beginPath();
+    ctx.moveTo(rightHipX - legWidth * 0.5, waistY);
+    ctx.lineTo(rightHipX - legWidth * 0.5, kneeY);
+    ctx.lineTo(rightHipX - legWidth * 0.4, feetY - 2 * scale);
+    ctx.lineTo(rightHipX + legWidth * 0.4, feetY - 2 * scale);
+    ctx.lineTo(rightHipX + legWidth * 0.6, kneeY);
+    ctx.lineTo(rightHipX + legWidth * 0.5, waistY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Combat Jump Boots
+    ctx.fillStyle = '#181b18';
+    ctx.beginPath();
+    ctx.roundRect(leftHipX - legWidth * 0.7, feetY - 4 * scale, legWidth * 1.5, 4 * scale + 1, 1);
+    ctx.roundRect(rightHipX - legWidth * 0.6, feetY - 4 * scale, legWidth * 1.5, 4 * scale + 1, 1);
+    ctx.fill();
+
+    // Knee Protectors
+    ctx.fillStyle = vestColor;
+    ctx.fillRect(leftHipX - legWidth * 0.5, kneeY - 2 * scale, legWidth, 4 * scale);
+    ctx.fillRect(rightHipX - legWidth * 0.5, kneeY - 2 * scale, legWidth, 4 * scale);
+
+    // 2. TORSO, JACKET & TACTICAL LOADOUT VEST
+    ctx.fillStyle = primaryCamo;
+    ctx.beginPath();
+    ctx.moveTo(cx - shoulderWidth * 0.5, neckY);
+    ctx.lineTo(cx + shoulderWidth * 0.5, neckY);
+    ctx.lineTo(cx + shoulderWidth * 0.38, waistY);
+    ctx.lineTo(cx - shoulderWidth * 0.38, waistY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Modular Tactical Plate Carrier
+    ctx.fillStyle = vestColor;
+    const vestTop = neckY + 1 * scale;
+    const vestHeight = (waistY - vestTop) * 0.88;
+    const vestWidth = shoulderWidth * 0.75;
+    ctx.beginPath();
+    ctx.roundRect(cx - vestWidth * 0.5, vestTop, vestWidth, vestHeight, 2);
+    ctx.fill();
+
+    // Ammo Pouches
+    ctx.fillStyle = '#1c2017';
+    const pouchW = vestWidth * 0.24;
+    const pouchH = vestHeight * 0.35;
+    const pouchY = vestTop + vestHeight * 0.45;
+    ctx.fillRect(cx - vestWidth * 0.38, pouchY, pouchW, pouchH);
+    ctx.fillRect(cx - pouchW * 0.5, pouchY, pouchW, pouchH);
+    ctx.fillRect(cx + vestWidth * 0.14, pouchY, pouchW, pouchH);
+
+    // Shoulder Radio & Antenna
+    ctx.fillStyle = '#111311';
+    ctx.fillRect(cx - shoulderWidth * 0.42, neckY - 2 * scale, 3 * scale, 8 * scale);
+    ctx.beginPath();
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1;
+    ctx.moveTo(cx - shoulderWidth * 0.4, neckY - 2 * scale);
+    ctx.lineTo(cx - shoulderWidth * 0.42, neckY - 8 * scale);
+    ctx.stroke();
+
+    // 3. ARMS & WEAPON
+    const armWidth = Math.max(2, 3.8 * scale);
+    const lShX = cx - shoulderWidth * 0.48;
+    const rShX = cx + shoulderWidth * 0.48;
+    const handX = cx + (tm.fwdX > 0 ? 3 : -3) * scale;
+    const handY = neckY + vestHeight * 0.55;
+
+    // Left Arm
+    ctx.fillStyle = primaryCamo;
+    ctx.beginPath();
+    ctx.moveTo(lShX, neckY);
+    ctx.lineTo(handX - 4 * scale, handY);
+    ctx.lineTo(handX - 2 * scale, handY + armWidth);
+    ctx.lineTo(lShX + armWidth, neckY + 4 * scale);
+    ctx.closePath();
+    ctx.fill();
+
+    // Right Arm
+    ctx.beginPath();
+    ctx.moveTo(rShX, neckY);
+    ctx.lineTo(handX + 6 * scale, handY + 1 * scale);
+    ctx.lineTo(handX + 4 * scale, handY + armWidth + 1 * scale);
+    ctx.lineTo(rShX - armWidth, neckY + 4 * scale);
+    ctx.closePath();
+    ctx.fill();
+
+    // Combat Gloves
+    ctx.fillStyle = '#222520';
+    ctx.beginPath();
+    ctx.arc(handX - 3 * scale, handY + 2 * scale, Math.max(1.5, 2.5 * scale), 0, Math.PI * 2);
+    ctx.arc(handX + 5 * scale, handY + 2 * scale, Math.max(1.5, 2.5 * scale), 0, Math.PI * 2);
+    ctx.fill();
+
+    // 4. WEAPON (Thompson / M16 Assault Rifle)
+    ctx.fillStyle = gunColor;
+    const gunLen = Math.max(12, 22 * scale);
+    const gunThick = Math.max(2, 3.2 * scale);
+    const aimDir = tm.fwdX < 0 ? -1 : 1;
+    const barrelX = handX + (aimDir * gunLen * 0.65);
+    const stockX = handX - (aimDir * gunLen * 0.35);
+
+    ctx.beginPath();
+    ctx.rect(Math.min(barrelX, stockX), handY, Math.abs(barrelX - stockX), gunThick);
+    ctx.fill();
+    ctx.fillStyle = '#3a2b1c';
+    ctx.fillRect(stockX - (aimDir > 0 ? 3 * scale : 0), handY - 1 * scale, 3 * scale, gunThick * 1.8);
+    ctx.fillStyle = '#15171a';
+    ctx.fillRect(handX - 1 * scale, handY + gunThick, 3 * scale, 5 * scale);
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(barrelX, handY + 0.5 * scale, 2 * scale, gunThick * 0.6);
+
+    // 5. HEAD & M1 STEEL HELMET
+    ctx.fillStyle = skinColor;
+    ctx.beginPath();
+    ctx.arc(cx, headY + headRadius * 1.1, headRadius * 0.78, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(cx - headRadius * 0.45, headY + headRadius * 0.95, headRadius * 0.35, headRadius * 0.25);
+    ctx.fillRect(cx + headRadius * 0.1, headY + headRadius * 0.95, headRadius * 0.35, headRadius * 0.25);
+
+    ctx.fillStyle = helmetColor;
+    ctx.beginPath();
+    ctx.arc(cx, headY + headRadius * 0.75, headRadius * 1.05, Math.PI * 0.85, Math.PI * 2.15);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#272c20';
+    ctx.lineWidth = Math.max(1.5, 2.2 * scale);
+    ctx.beginPath();
+    ctx.moveTo(cx - headRadius * 1.25, headY + headRadius * 0.9);
+    ctx.quadraticCurveTo(cx, headY + headRadius * 0.75, cx + headRadius * 1.25, headY + headRadius * 0.9);
+    ctx.stroke();
+
+    // 6. ALLIED CONTOUR
+    ctx.strokeStyle = glowColor;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // --- Off-Screen Allied Radar / Directional Pointer ---
+  drawOffscreenIndicator(ctx, tm, cam, w, h) {
+    if (!cam || !cam.valid) return;
+    const dx = tm.x - cam.x;
+    const dy = tm.y - cam.y;
+    const camYaw = Math.atan2(cam.fwd.y, cam.fwd.x);
+    const targetYaw = Math.atan2(dy, dx);
+    let diff = targetYaw - camYaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+
+    const distM = Math.round(Math.hypot(dx, dy, tm.z - cam.z) * 0.0254);
+    const arrowDist = Math.min(w, h) * 0.44;
+    const ax = w / 2 + Math.sin(diff) * arrowDist;
+    const ay = h / 2 - Math.cos(diff) * arrowDist;
+
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(diff);
+
+    ctx.fillStyle = tm.isHost ? '#f59e0b' : '#10b981';
+    ctx.beginPath();
+    ctx.moveTo(0, -14);
+    ctx.lineTo(-9, 10);
+    ctx.lineTo(0, 5);
+    ctx.lineTo(9, 10);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 11px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${tm.isHost ? '👑' : '🧟'} ${tm.name || 'Friend'} [${distM}m]`, ax, Math.min(h - 12, Math.max(20, ay + 18)));
+    ctx.restore();
+  }
+
   // --- Real Zombie Box ESP & Live Radar Renderer ---
   startESPOverlay() {
     let canvas = document.getElementById('modmenu-esp-canvas');
@@ -1010,28 +1305,24 @@ class ModMenuManager {
           const head = this.projectWorldToScreen(tm.x, tm.y, tm.z + 68, cam, w, h);
 
           if (feet && head) {
-            const bHeight = Math.max(16, feet.y - head.y);
+            const bHeight = Math.max(20, feet.y - head.y);
             const bWidth = Math.max(12, bHeight * 0.45);
-            const bLeft = feet.x - bWidth / 2;
             const bTop = head.y;
 
-            ctx.save();
-            ctx.strokeStyle = tm.isHost ? 'rgba(239, 68, 68, 0.9)' : 'rgba(16, 185, 129, 0.9)';
-            ctx.lineWidth = 1.8;
-            ctx.fillStyle = tm.isHost ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)';
-            ctx.strokeRect(bLeft, bTop, bWidth, bHeight);
-            ctx.fillRect(bLeft, bTop, bWidth, bHeight);
+            // 1. Draw Real 3D Tactical Soldier Character Model & Uniform
+            this.drawTacticalSoldier(ctx, feet.x, head.y, feet.y, bHeight, bWidth, tm.isHost, tm);
 
-            // Snapline to feet
+            ctx.save();
+            // 2. Snapline to feet
             ctx.beginPath();
-            ctx.strokeStyle = tm.isHost ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)';
+            ctx.strokeStyle = tm.isHost ? 'rgba(245, 158, 11, 0.45)' : 'rgba(16, 185, 129, 0.45)';
             ctx.setLineDash([4, 4]);
             ctx.moveTo(w / 2, h - 20);
             ctx.lineTo(feet.x, feet.y);
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Floating 3D Nametag badge
+            // 3. Floating 3D Nametag badge above head
             const tagY = bTop - 18;
             const tagText = `${tm.isHost ? '👑' : '🧟'} ${tm.name || 'Friend'} [${distM}m]`;
             ctx.font = 'bold 11px -apple-system, sans-serif';
@@ -1039,7 +1330,7 @@ class ModMenuManager {
             const tagX = feet.x - tagW / 2;
 
             ctx.fillStyle = 'rgba(10, 12, 18, 0.9)';
-            ctx.strokeStyle = tm.isHost ? '#ef4444' : '#10b981';
+            ctx.strokeStyle = tm.isHost ? '#f59e0b' : '#10b981';
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.roundRect(tagX, tagY - 14, tagW, 18, 4);
@@ -1049,7 +1340,7 @@ class ModMenuManager {
             ctx.fillStyle = '#ffffff';
             ctx.fillText(tagText, tagX + 8, tagY - 1);
 
-            // Health bar
+            // 4. Health bar
             const hpW = Math.min(60, tagW);
             const hpX = feet.x - hpW / 2;
             ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
@@ -1058,6 +1349,9 @@ class ModMenuManager {
             ctx.fillRect(hpX, tagY + 6, hpW * ((tm.health || 100) / 100), 3);
 
             ctx.restore();
+          } else {
+            // Teammate is off-screen or behind player: Draw 3D radar directional indicator
+            this.drawOffscreenIndicator(ctx, tm, cam, w, h);
           }
         }
       }
