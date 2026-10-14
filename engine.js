@@ -438,6 +438,8 @@ export function createEngine(canvas, state) {
         }
       } catch (e) {}
     }
+
+    const query = new URLSearchParams(location.search);
     const perfMode = query.get('quality') !== 'high' && localStorage.getItem('bo1z-quality') !== 'high';
     if (perfMode) {
       args.splice(args.indexOf('+devmap'), 0,
